@@ -4,7 +4,7 @@ name: Export code-scanning SARIF to repo
 on:
   workflow_dispatch:
   schedule:
-    - cron: "0 3 * * 1"  # Mondays 03:00 UTC
+    - cron: "0 3 * * 1"
 
 permissions:
   contents: write
@@ -16,8 +16,6 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # (Optional) filter by tool or ref:
-      #   Add: ?tool_name=CodeQL&ref=refs/heads/main
       - name: Get latest analysis id
         id: list
         run: |
@@ -28,7 +26,6 @@ jobs:
             -H "Authorization: Bearer ${{ github.token }}" \
             -H "X-GitHub-Api-Version: 2022-11-28" \
             "$API" | jq -r '.[0].id')
-
           if [ -z "${ANALYSIS_ID}" ] || [ "${ANALYSIS_ID}" = "null" ]; then
             echo "No code-scanning analyses found. Did a scan run on this repo?"
             exit 1
@@ -46,51 +43,45 @@ jobs:
             "https://api.github.com/repos/${{ github.repository }}/code-scanning/analyses/${{ steps.list.outputs.analysis_id }}" \
             -o security/reports/code-scanning-${{ github.run_id }}.sarif.json
 
-      # Normalize for stricter viewers:
-      # 1) drop minimal runs[].artifacts arrays
-      # 2) remove artifactLocation.index pointers (since artifacts array is gone)
-      # 3) prune empty message objects
       - name: Normalize SARIF for strict viewers
         run: |
           set -euo pipefail
           in=security/reports/code-scanning-${{ github.run_id }}.sarif.json
           out=security/reports/code-scanning-${{ github.run_id }}.sarif.cleaned.json
-
           jq '
             def walk(f):
               . as $in
               | if type == "object" then
-                  reduce keys[] as $key ({}; . + { ($key): ( ($in[$key] | walk(f)) ) } ) | f
+                  reduce keys[] as $k ({}; . + { ($k): ($in[$k] | walk(f)) }) | f
                 elif type == "array" then
-                  map( walk(f) ) | f
-                else
-                  f
-                end;
+                  map(walk(f)) | f
+                else f end;
 
             .runs |= map(
-              del(.artifacts)                                                     # 1
-              | walk( if type=="object" and has("artifactLocation") and (.artifactLocation|type)=="object"
-                      then .artifactLocation |= del(.index) else . end )         # 2
-              | walk( if type=="object" and has("message") and (.message|type)=="object"
-                      and ((.message|keys|length)==0)
-                      then del(.message) else . end )                            # 3
+              del(.artifacts)
+              | walk(
+                  if type=="object" and has("artifactLocation") and (.artifactLocation|type)=="object"
+                  then .artifactLocation |= del(.index) else . end
+                )
+              | walk(
+                  if type=="object" and has("message") and (.message|type)=="object"
+                     and ((.message|keys|length)==0)
+                  then del(.message) else . end
+                )
             )
           ' "$in" > "$out"
           mv "$out" "$in"
 
-      # Install & run official SARIF Multitool (no Docker)
       - name: Setup .NET
         uses: actions/setup-dotnet@v4
         with:
           dotnet-version: '8.0.x'
 
-      - name: Install SARIF Multitool
+      - name: Install SARIF Multitool (local)
         run: dotnet tool install --tool-path . Sarif.Multitool
 
       - name: Validate SARIF
-        run: |
-          set -euo pipefail
-          ./Sarif.Multitool validate security/reports/code-scanning-${{ github.run_id }}.sarif.json
+        run: ./sarif validate security/reports/code-scanning-${{ github.run_id }}.sarif.json
 
       - name: Commit SARIF file
         uses: stefanzweifel/git-auto-commit-action@v5
