@@ -62,23 +62,16 @@ jobs:
               (type=="object") and has("id") and ((keys|length)==1);
 
             .runs |= map(
-              # A) Remove minimal artifacts array
               del(.artifacts)
-
-              # B) Strip artifactLocation.index pointers
               | walk(
                   if type=="object" and has("artifactLocation") and (.artifactLocation|type)=="object"
                   then .artifactLocation |= del(.index) else . end
                 )
-
-              # C) Remove empty message objects
               | walk(
                   if type=="object" and has("message") and (.message|type)=="object"
                      and ((.message|keys|length)==0)
                   then del(.message) else . end
                 )
-
-              # D) SARIF1001: drop rule.name when it equals rule.id
               | (if (.tool.driver.rules? // null) != null then
                    .tool.driver.rules |= map( if (.name? and .id? and .name == .id) then del(.name) else . end )
                  else . end)
@@ -89,8 +82,6 @@ jobs:
                      else . end
                    )
                  else . end)
-
-              # E) Drop rules arrays if every rule is minimal
               | (if (.tool.driver.rules? // null) != null and
                      ( .tool.driver.rules | length > 0 ) and
                      ( all(.tool.driver.rules[]; is_minimal_rule) )
@@ -103,20 +94,15 @@ jobs:
                      then del(.rules) else . end
                    )
                  else . end)
-
-              # F) Results normalization (+ 2007 uriBaseIds)
               | (if (.results? // null) != null then
                    .results |= map(
                      if (.rule? // null) != null and (.rule|type)=="object" then
-                       # If rule minimal -> prefer ruleId and drop rule; else keep rule, drop ruleId/ruleIndex
                        ( if ((.rule|type)=="object" and (.rule|keys|length)==1 and (.rule|has("id"))) then
                            ( .ruleId = (.ruleId // .rule.id) ) | del(.rule)
                          else
                            del(.ruleId, .ruleIndex)
                          end )
                      else . end
-
-                     # Add uriBaseId: "SRCROOT" to all result locations
                      | ( if (.locations? // null) != null then
                            .locations |= map(
                              if (.physicalLocation?.artifactLocation? // null) != null and
@@ -125,7 +111,6 @@ jobs:
                              else . end
                            )
                          else . end )
-                     # RelatedLocations too
                      | ( if (.relatedLocations? // null) != null then
                            .relatedLocations |= map(
                              if (.physicalLocation?.artifactLocation? // null) != null and
@@ -134,15 +119,12 @@ jobs:
                              else . end
                            )
                          else . end )
-                     # And analysisTarget
                      | ( if (.analysisTarget?.artifactLocation? // null) != null and
                               ((.analysisTarget.artifactLocation.uriBaseId? // null) == null)
                          then .analysisTarget.artifactLocation.uriBaseId = "SRCROOT"
                          else . end )
                    )
                  else . end)
-
-              # G) SARIF2005: tool metadata
               | (.tool.driver |= (
                    .
                    | ( if (.name? and ((.name|tostring)|split(" ")|length) > 3)
@@ -156,8 +138,6 @@ jobs:
                        then .semanticVersion = "0.0.0"
                        else . end )
                  ))
-
-              # H) SARIF2007: ensure versionControlProvenance[*].mappedTo.uriBaseId exists
               | ( if (.versionControlProvenance? // null) != null then
                     .versionControlProvenance |= map(
                       .mappedTo |= ( .mappedTo // {} )
@@ -165,12 +145,8 @@ jobs:
                     )
                   else . end)
             )
-
-            # I) VS Code compatibility polish:
-            #    - Ensure top-level version & $schema
-            #    - Coerce all artifactLocation.uri values to strings with forward slashes
             | ( .version = "2.1.0" )
-            | ( .$schema = "https://raw.githubusercontent.com/oasis-tcs/sarif-spec/master/Schemata/sarif-schema-2.1.0.json" )
+            | ( .["$schema"] = "https://raw.githubusercontent.com/oasis-tcs/sarif-spec/master/Schemata/sarif-schema-2.1.0.json" )
             | walk(
                 if (type=="object" and has("artifactLocation") and (.artifactLocation|type)=="object" and (.artifactLocation.uri? // null) != null)
                 then .artifactLocation.uri = ((.artifactLocation.uri|tostring) | gsub("\\\\"; "/"))
@@ -188,7 +164,6 @@ jobs:
       - name: Install SARIF Multitool (local)
         run: dotnet tool install --tool-path . Sarif.Multitool
 
-      # Pretty-print & schema-normalize (helps the VS Code viewer)
       - name: Reformat SARIF (pretty-print)
         run: ./sarif reformat security/reports/code-scanning-${{ github.run_id }}.sarif.json
 
