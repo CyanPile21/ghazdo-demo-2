@@ -15,7 +15,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # Optional: add ?tool_name=CodeQL&ref=refs/heads/main to the API URL below
+      # Optional: append ?tool_name=CodeQL&ref=refs/heads/main
       - name: Get latest analysis id
         id: list
         run: |
@@ -43,7 +43,6 @@ jobs:
             "https://api.github.com/repos/${{ github.repository }}/code-scanning/analyses/${{ steps.list.outputs.analysis_id }}" \
             -o security/reports/code-scanning-${{ github.run_id }}.sarif.json
 
-      # Normalize for strict viewers + SARIF2004/2005/2007 fixes
       - name: Normalize SARIF for strict viewers
         run: |
           set -euo pipefail
@@ -63,117 +62,4 @@ jobs:
               (type=="object") and has("id") and ((keys|length)==1);
 
             .runs |= map(
-              # A) Remove minimal artifacts array (avoids SARIF2004)
-              del(.artifacts)
-
-              # B) Strip artifactLocation.index pointers
-              | walk(
-                  if type=="object" and has("artifactLocation") and (.artifactLocation|type)=="object"
-                  then .artifactLocation |= del(.index) else . end
-                )
-
-              # C) Remove empty message objects
-              | walk(
-                  if type=="object" and has("message") and (.message|type)=="object"
-                     and ((.message|keys|length)==0)
-                  then del(.message) else . end
-                )
-
-              # D) SARIF1001: drop rule.name when it equals rule.id
-              | (if (.tool.driver.rules? // null) != null then
-                   .tool.driver.rules |= map( if (.name? and .id? and .name == .id) then del(.name) else . end )
-                 else . end)
-              | (if (.tool.extensions? // null) != null then
-                   .tool.extensions |= map(
-                     if (.rules? // null) != null
-                     then .rules |= map( if (.name? and .id? and .name == .id) then del(.name) else . end )
-                     else . end
-                   )
-                 else . end)
-
-              # E) Drop rules arrays if every rule is minimal (SARIF2004)
-              | (if (.tool.driver.rules? // null) != null and
-                     ( .tool.driver.rules | length > 0 ) and
-                     ( all(.tool.driver.rules[]; is_minimal_rule) )
-                 then del(.tool.driver.rules) else . end)
-              | (if (.tool.extensions? // null) != null then
-                   .tool.extensions |= map(
-                     if (.rules? // null) != null and
-                        ( .rules | length > 0 ) and
-                        ( all(.rules[]; is_minimal_rule) )
-                     then del(.rules) else . end
-                   )
-                 else . end)
-
-              # F) Results normalization (resolves remaining SARIF2004)
-              | (if (.results? // null) != null then
-                   .results |= map(
-                     if (.rule? // null) != null and (.rule|type)=="object" then
-                       # If rule is minimal -> prefer ruleId and drop rule
-                       ( if (.rule | is_minimal_rule) then
-                           ( .ruleId = (.ruleId // .rule.id) ) | del(.rule)
-                         else
-                           # rule has metadata -> keep rule, drop ruleId/ruleIndex
-                           del(.ruleId, .ruleIndex)
-                         end )
-                     else
-                       .
-                     end
-                     # Drop analysisTarget if same as primary location
-                     | ( if (.analysisTarget? // null) != null and
-                          (.locations? // null) != null and
-                          ((.locations|length) > 0) and
-                          (.analysisTarget.artifactLocation.uri? // null) != null and
-                          (.locations[0].physicalLocation.artifactLocation.uri? // null) != null and
-                          (.analysisTarget.artifactLocation.uri
-                           == .locations[0].physicalLocation.artifactLocation.uri)
-                        then del(.analysisTarget) else . end )
-                   )
-                 else . end)
-
-              # G) SARIF2005: ensure tool metadata (name<=3 words, info URL, version/semanticVersion)
-              | (.tool.driver |= (
-                   .
-                   # name: at most 3 words; keep original as fullName if needed
-                   | ( if (.name? and ((.name|tostring)|split(" ")|length) > 3)
-                       then .fullName = (.fullName // .name)
-                            | .name = ((.name|tostring)|split(" ")[0:3]|join(" "))
-                       else . end )
-                   # informationUri: add if missing
-                   | ( if (.informationUri? // null) == null
-                       then .informationUri = "https://codeql.github.com/"
-                       else . end )
-                   # version/semanticVersion: ensure at least one exists
-                   | ( if ((.version? // null) == null and (.semanticVersion? // null) == null)
-                       then .semanticVersion = "0.0.0"
-                       else . end )
-                 ))
-
-              # H) SARIF2007: ensure versionControlProvenance[*].mappedTo.uriBaseId exists
-              | ( if (.versionControlProvenance? // null) != null then
-                    .versionControlProvenance |= map(
-                      .mappedTo |= ( .mappedTo // {} )
-                      | .mappedTo.uriBaseId = ( .mappedTo.uriBaseId // "SRCROOT" )
-                    )
-                  else . end)
-            )
-          ' "$in" > "$out"
-          mv "$out" "$in"
-
-      # Validate with official Multitool (no Docker)
-      - name: Setup .NET
-        uses: actions/setup-dotnet@v4
-        with:
-          dotnet-version: '8.0.x'
-
-      - name: Install SARIF Multitool (local)
-        run: dotnet tool install --tool-path . Sarif.Multitool
-
-      - name: Validate SARIF
-        run: ./sarif validate security/reports/code-scanning-${{ github.run_id }}.sarif.json
-
-      - name: Commit SARIF file
-        uses: stefanzweifel/git-auto-commit-action@v5
-        with:
-          commit_message: "chore: export latest code-scanning SARIF (normalized & validated)"
-          file_pattern: security/reports/*.sarif.json
+              #
