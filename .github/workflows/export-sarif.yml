@@ -1,4 +1,3 @@
-# .github/workflows/export-sarif.yml
 name: Export code-scanning SARIF to repo
 
 on:
@@ -16,7 +15,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # Optional: add ?tool_name=CodeQL&ref=refs/heads/main
+      # Optional: filter by tool or branch by appending e.g. ?tool_name=CodeQL&ref=refs/heads/main
       - name: Get latest analysis id
         id: list
         run: |
@@ -44,7 +43,13 @@ jobs:
             "https://api.github.com/repos/${{ github.repository }}/code-scanning/analyses/${{ steps.list.outputs.analysis_id }}" \
             -o security/reports/code-scanning-${{ github.run_id }}.sarif.json
 
-      # Hardened normalization to satisfy strict viewers & SARIF2004
+      # Normalize for strict viewers:
+      #  - drop minimal runs[].artifacts arrays (avoids SARIF2004)
+      #  - remove artifactLocation.index pointers (since artifacts array is gone)
+      #  - prune empty message objects
+      #  - fix SARIF1001 by dropping rule.name when it equals rule.id
+      #  - resolve SARIF2004 redundancy: if result.rule exists with metadata => drop ruleId/ruleIndex;
+      #    if result.rule is minimal (id only) => keep ruleId and drop rule.
       - name: Normalize SARIF for strict viewers
         run: |
           set -euo pipefail
@@ -67,12 +72,10 @@ jobs:
               # A) Remove minimal artifacts array
               del(.artifacts)
 
-              # B) Strip artifactLocation.index pointers (since artifacts array is gone)
+              # B) Strip artifactLocation.index pointers
               | walk(
                   if type=="object" and has("artifactLocation") and (.artifactLocation|type)=="object"
-                  then .artifactLocation |= del(.index)
-                  else .
-                  end
+                  then .artifactLocation |= del(.index) else . end
                 )
 
               # C) Remove empty message objects
@@ -94,13 +97,11 @@ jobs:
                    )
                  else . end)
 
-              # E) If driver.rules exists but every rule is minimal (id only), drop the array (SARIF2004)
+              # E) Drop rules arrays if every rule is minimal (SARIF2004)
               | (if (.tool.driver.rules? // null) != null and
                      ( .tool.driver.rules | length > 0 ) and
                      ( all(.tool.driver.rules[]; is_minimal_rule) )
                  then del(.tool.driver.rules) else . end)
-
-              # F) Same for extensions[].rules
               | (if (.tool.extensions? // null) != null then
                    .tool.extensions |= map(
                      if (.rules? // null) != null and
@@ -110,25 +111,29 @@ jobs:
                    )
                  else . end)
 
-              # G) Prefer result.ruleId over minimal result.rule; drop minimal rule objects
+              # F) Results normalization (handles your remaining SARIF2004)
               | (if (.results? // null) != null then
                    .results |= map(
-                     # If result.rule exists with just {id}, set ruleId (if missing) and drop rule
-                     if (.rule? // null) != null and (.rule|type)=="object" and (.rule.id? // null) != null
-                     then
-                       ( .ruleId = (.ruleId // .rule.id) )
-                       | ( if ((.rule|keys|length)==1 and (.rule|has("id"))) then del(.rule) else . end )
-                     else .
+                     if (.rule? // null) != null and (.rule|type)=="object" then
+                       # If rule is minimal -> prefer ruleId and drop rule
+                       ( if (.rule | is_minimal_rule) then
+                           ( .ruleId = (.ruleId // .rule.id) ) | del(.rule)
+                         else
+                           # rule has metadata -> keep rule, drop ruleId/ruleIndex
+                           del(.ruleId, .ruleIndex)
+                         end )
+                     else
+                       .
                      end
-                     # Also drop analysisTarget if it matches the primary location URI
+                     # Also drop analysisTarget if it matches the primary location
                      | ( if (.analysisTarget? // null) != null and
-                           (.locations? // null) != null and
-                           ((.locations|length) > 0) and
-                           (.analysisTarget.artifactLocation.uri? // null) != null and
-                           (.locations[0].physicalLocation.artifactLocation.uri? // null) != null and
-                           (.analysisTarget.artifactLocation.uri
-                            == .locations[0].physicalLocation.artifactLocation.uri)
-                         then del(.analysisTarget) else . end )
+                          (.locations? // null) != null and
+                          ((.locations|length) > 0) and
+                          (.analysisTarget.artifactLocation.uri? // null) != null and
+                          (.locations[0].physicalLocation.artifactLocation.uri? // null) != null and
+                          (.analysisTarget.artifactLocation.uri
+                           == .locations[0].physicalLocation.artifactLocation.uri)
+                        then del(.analysisTarget) else . end )
                    )
                  else . end)
             )
