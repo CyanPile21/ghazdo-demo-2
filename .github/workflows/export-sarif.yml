@@ -164,8 +164,12 @@ jobs:
       - name: Install SARIF Multitool (local)
         run: dotnet tool install --tool-path . Sarif.Multitool
 
-      - name: Reformat SARIF (pretty-print)
-        run: ./sarif reformat security/reports/code-scanning-${{ github.run_id }}.sarif.json
+      # Pretty-print with jq (since this Multitool version has no 'reformat' verb)
+      - name: Pretty-print JSON
+        run: |
+          tmp=security/reports/code-scanning-${{ github.run_id }}.tmp.json
+          jq -S . security/reports/code-scanning-${{ github.run_id }}.sarif.json > "$tmp"
+          mv "$tmp" security/reports/code-scanning-${{ github.run_id }}.sarif.json
 
       - name: Duplicate as .sarif (VS Code friendly)
         run: |
@@ -177,7 +181,7 @@ jobs:
       - name: Commit SARIF file
         uses: stefanzweifel/git-auto-commit-action@v5
         with:
-          commit_message: "chore: export latest code-scanning SARIF (VS Code compatible)"
+          commit_message: "chore: export latest code-scanning SARIF (normalized & validated)"
           file_pattern: |
             security/reports/*.sarif.json
             security/reports/*.sarif
