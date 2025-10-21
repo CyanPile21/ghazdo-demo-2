@@ -112,4 +112,97 @@ jobs:
                        ( if ((.rule|type)=="object" and (.rule|keys|length)==1 and (.rule|has("id"))) then
                            ( .ruleId = (.ruleId // .rule.id) ) | del(.rule)
                          else
-                           del(.ruleId, .ruleIndex
+                           del(.ruleId, .ruleIndex)
+                         end )
+                     else . end
+
+                     # Add uriBaseId: "SRCROOT" to all result locations
+                     | ( if (.locations? // null) != null then
+                           .locations |= map(
+                             if (.physicalLocation?.artifactLocation? // null) != null and
+                                ((.physicalLocation.artifactLocation.uriBaseId? // null) == null)
+                             then .physicalLocation.artifactLocation.uriBaseId = "SRCROOT"
+                             else . end
+                           )
+                         else . end )
+                     # RelatedLocations too
+                     | ( if (.relatedLocations? // null) != null then
+                           .relatedLocations |= map(
+                             if (.physicalLocation?.artifactLocation? // null) != null and
+                                ((.physicalLocation.artifactLocation.uriBaseId? // null) == null)
+                             then .physicalLocation.artifactLocation.uriBaseId = "SRCROOT"
+                             else . end
+                           )
+                         else . end )
+                     # And analysisTarget
+                     | ( if (.analysisTarget?.artifactLocation? // null) != null and
+                              ((.analysisTarget.artifactLocation.uriBaseId? // null) == null)
+                         then .analysisTarget.artifactLocation.uriBaseId = "SRCROOT"
+                         else . end )
+                   )
+                 else . end)
+
+              # G) SARIF2005: tool metadata
+              | (.tool.driver |= (
+                   .
+                   | ( if (.name? and ((.name|tostring)|split(" ")|length) > 3)
+                       then .fullName = (.fullName // .name)
+                            | .name = ((.name|tostring)|split(" ")[0:3]|join(" "))
+                       else . end )
+                   | ( if (.informationUri? // null) == null
+                       then .informationUri = "https://codeql.github.com/"
+                       else . end )
+                   | ( if ((.version? // null) == null and (.semanticVersion? // null) == null)
+                       then .semanticVersion = "0.0.0"
+                       else . end )
+                 ))
+
+              # H) SARIF2007: ensure versionControlProvenance[*].mappedTo.uriBaseId exists
+              | ( if (.versionControlProvenance? // null) != null then
+                    .versionControlProvenance |= map(
+                      .mappedTo |= ( .mappedTo // {} )
+                      | .mappedTo.uriBaseId = ( .mappedTo.uriBaseId // "SRCROOT" )
+                    )
+                  else . end)
+            )
+
+            # I) VS Code compatibility polish:
+            #    - Ensure top-level version & $schema
+            #    - Coerce all artifactLocation.uri values to strings with forward slashes
+            | ( .version = "2.1.0" )
+            | ( .$schema = "https://raw.githubusercontent.com/oasis-tcs/sarif-spec/master/Schemata/sarif-schema-2.1.0.json" )
+            | walk(
+                if (type=="object" and has("artifactLocation") and (.artifactLocation|type)=="object" and (.artifactLocation.uri? // null) != null)
+                then .artifactLocation.uri = ((.artifactLocation.uri|tostring) | gsub("\\\\"; "/"))
+                else .
+                end
+              )
+          ' "$in" > "$out"
+          mv "$out" "$in"
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+
+      - name: Install SARIF Multitool (local)
+        run: dotnet tool install --tool-path . Sarif.Multitool
+
+      # Pretty-print & schema-normalize (helps the VS Code viewer)
+      - name: Reformat SARIF (pretty-print)
+        run: ./sarif reformat security/reports/code-scanning-${{ github.run_id }}.sarif.json
+
+      - name: Duplicate as .sarif (VS Code friendly)
+        run: |
+          cp security/reports/code-scanning-${{ github.run_id }}.sarif.json security/reports/code-scanning-${{ github.run_id }}.sarif
+
+      - name: Validate SARIF
+        run: ./sarif validate security/reports/code-scanning-${{ github.run_id }}.sarif.json
+
+      - name: Commit SARIF file
+        uses: stefanzweifel/git-auto-commit-action@v5
+        with:
+          commit_message: "chore: export latest code-scanning SARIF (VS Code compatible)"
+          file_pattern: |
+            security/reports/*.sarif.json
+            security/reports/*.sarif
