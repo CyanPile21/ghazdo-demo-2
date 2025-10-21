@@ -4,7 +4,7 @@ name: Export code-scanning SARIF to repo
 on:
   workflow_dispatch:
   schedule:
-    - cron: "0 3 * * 1"
+    - cron: "0 3 * * 1"  # Mondays 03:00 UTC
 
 permissions:
   contents: write
@@ -16,6 +16,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # Optional: filter by tool or branch, e.g. append:
+      #   ?tool_name=CodeQL&ref=refs/heads/main
       - name: Get latest analysis id
         id: list
         run: |
@@ -27,7 +29,7 @@ jobs:
             -H "X-GitHub-Api-Version: 2022-11-28" \
             "$API" | jq -r '.[0].id')
           if [ -z "${ANALYSIS_ID}" ] || [ "${ANALYSIS_ID}" = "null" ]; then
-            echo "No code-scanning analyses found. Did a scan run on this repo?"
+            echo "No code-scanning analyses found. Has a scan run yet?"
             exit 1
           fi
           echo "analysis_id=$ANALYSIS_ID" >> "$GITHUB_OUTPUT"
@@ -43,11 +45,17 @@ jobs:
             "https://api.github.com/repos/${{ github.repository }}/code-scanning/analyses/${{ steps.list.outputs.analysis_id }}" \
             -o security/reports/code-scanning-${{ github.run_id }}.sarif.json
 
+      # Normalize for strict viewers:
+      #  - drop minimal runs[].artifacts arrays (avoids SARIF2004)
+      #  - remove artifactLocation.index pointers (since artifacts array is gone)
+      #  - prune empty message objects
+      #  - fix SARIF1001 by dropping rule.name when it equals rule.id
       - name: Normalize SARIF for strict viewers
         run: |
           set -euo pipefail
           in=security/reports/code-scanning-${{ github.run_id }}.sarif.json
           out=security/reports/code-scanning-${{ github.run_id }}.sarif.cleaned.json
+
           jq '
             def walk(f):
               . as $in
@@ -58,20 +66,56 @@ jobs:
                 else f end;
 
             .runs |= map(
+              # 1) Remove minimal artifacts array
               del(.artifacts)
+
+              # 2) Strip artifactLocation.index fields anywhere
               | walk(
                   if type=="object" and has("artifactLocation") and (.artifactLocation|type)=="object"
-                  then .artifactLocation |= del(.index) else . end
+                  then .artifactLocation |= del(.index)
+                  else .
+                  end
                 )
+
+              # 3) Remove empty message objects
               | walk(
                   if type=="object" and has("message") and (.message|type)=="object"
                      and ((.message|keys|length)==0)
                   then del(.message) else . end
                 )
+
+              # 4) SARIF1001: rule.name must differ from rule.id
+              #    - driver rules
+              | (if (.tool.driver.rules? // null) != null then
+                   .tool.driver.rules |= map(
+                     if (.name? and .id? and .name == .id) then del(.name) else . end
+                   )
+                 else . end)
+
+              #    - extension rules (if present)
+              | (if (.tool.extensions? // null) != null then
+                   .tool.extensions |= map(
+                     if (.rules? // null) != null then
+                       .rules |= map( if (.name? and .id? and .name == .id) then del(.name) else . end )
+                     else . end
+                   )
+                 else . end)
+
+              #    - inline result.rule descriptors
+              | (if (.results? // null) != null then
+                   .results |= map(
+                     if (.rule? // null) != null and (.rule|type)=="object"
+                        and (.rule.name? and .rule.id? and .rule.name == .rule.id)
+                     then (.rule |= del(.name))
+                     else .
+                     end
+                   )
+                 else . end)
             )
           ' "$in" > "$out"
           mv "$out" "$in"
 
+      # Install & run official SARIF Multitool without Docker
       - name: Setup .NET
         uses: actions/setup-dotnet@v4
         with:
