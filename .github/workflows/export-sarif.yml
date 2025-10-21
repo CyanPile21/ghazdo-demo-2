@@ -38,25 +38,31 @@ jobs:
             -o security/reports/code-scanning-${{ github.run_id }}.sarif.json
 
       # Fix 1: normalize away arrays that trip SARIF2004
-      - name: Normalize SARIF (drop minimal arrays)
-        run: |
-          in=security/reports/code-scanning-${{ github.run_id }}.sarif.json
-          out=security/reports/code-scanning-${{ github.run_id }}.sarif.cleaned.json
-          jq '
-            .runs |= map(
-              if (.tool.driver.rules? // null) != null and
-                 ( (.tool.driver.rules | length) > 0 ) and
-                 ( all(.tool.driver.rules[]; (keys | length) == 1 and has("id")) )
-              then del(.tool.driver.rules) else . end
-            )
-          ' "$in" > "$out"
-          mv "$out" "$in"
+     # - name: Normalize SARIF (drop minimal arrays)
+      #  run: |
+       #   in=security/reports/code-scanning-${{ github.run_id }}.sarif.json
+       #   out=security/reports/code-scanning-${{ github.run_id }}.sarif.cleaned.json
+       #   jq '
+        #    .runs |= map(
+        #      if (.tool.driver.rules? // null) != null and
+         #        ( (.tool.driver.rules | length) > 0 ) and
+         #        ( all(.tool.driver.rules[]; (keys | length) == 1 and has("id")) )
+         #     then del(.tool.driver.rules) else . end
+         #   )
+        #  ' "$in" > "$out"
+        #  mv "$out" "$in"
 
       # Fix 2: validate with Microsoft SARIF Multitool
-     # - name: Validate SARIF
-      #  uses: microsoft/sarif-actions@v0.1
-       # with:
-        #  command: "validate security/reports/code-scanning-${{ github.run_id }}.sarif.json"
+      - name: Validate SARIF
+        uses: microsoft/sarif-actions@v0.1
+        with:
+          command: "validate security/reports/code-scanning-${{ github.run_id }}.sarif.json"
+      
+      - name: Reformat SARIF
+        uses: microsoft/sarif-actions@v0.1
+        with:
+          command: "reformat security/reports/code-scanning-${{ github.run_id }}.sarif.json"
+
 
       - name: Commit SARIF file
         uses: stefanzweifel/git-auto-commit-action@v5
