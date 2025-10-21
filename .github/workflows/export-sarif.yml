@@ -43,7 +43,7 @@ jobs:
             "https://api.github.com/repos/${{ github.repository }}/code-scanning/analyses/${{ steps.list.outputs.analysis_id }}" \
             -o security/reports/code-scanning-${{ github.run_id }}.sarif.json
 
-      - name: Normalize SARIF for strict viewers
+      - name: Normalize SARIF (strict viewers)
         run: |
           set -euo pipefail
           in=security/reports/code-scanning-${{ github.run_id }}.sarif.json
@@ -62,16 +62,23 @@ jobs:
               (type=="object") and has("id") and ((keys|length)==1);
 
             .runs |= map(
+              # Remove minimal artifacts
               del(.artifacts)
+
+              # Strip artifactLocation.index pointers
               | walk(
                   if type=="object" and has("artifactLocation") and (.artifactLocation|type)=="object"
                   then .artifactLocation |= del(.index) else . end
                 )
+
+              # Drop empty messages
               | walk(
                   if type=="object" and has("message") and (.message|type)=="object"
                      and ((.message|keys|length)==0)
                   then del(.message) else . end
                 )
+
+              # SARIF1001: drop rule.name if equals id
               | (if (.tool.driver.rules? // null) != null then
                    .tool.driver.rules |= map( if (.name? and .id? and .name == .id) then del(.name) else . end )
                  else . end)
@@ -82,6 +89,8 @@ jobs:
                      else . end
                    )
                  else . end)
+
+              # Drop rules arrays if every rule is id-only
               | (if (.tool.driver.rules? // null) != null and
                      ( .tool.driver.rules | length > 0 ) and
                      ( all(.tool.driver.rules[]; is_minimal_rule) )
@@ -94,6 +103,8 @@ jobs:
                      then del(.rules) else . end
                    )
                  else . end)
+
+              # Results: prefer ruleId when rule is minimal; else keep rule and drop ruleId/ruleIndex
               | (if (.results? // null) != null then
                    .results |= map(
                      if (.rule? // null) != null and (.rule|type)=="object" then
@@ -103,6 +114,8 @@ jobs:
                            del(.ruleId, .ruleIndex)
                          end )
                      else . end
+
+                     # Ensure uriBaseId="SRCROOT" everywhere relevant
                      | ( if (.locations? // null) != null then
                            .locations |= map(
                              if (.physicalLocation?.artifactLocation? // null) != null and
@@ -125,6 +138,8 @@ jobs:
                          else . end )
                    )
                  else . end)
+
+              # SARIF2005: tool metadata
               | (.tool.driver |= (
                    .
                    | ( if (.name? and ((.name|tostring)|split(" ")|length) > 3)
@@ -138,6 +153,8 @@ jobs:
                        then .semanticVersion = "0.0.0"
                        else . end )
                  ))
+
+              # SARIF2007: ensure versionControlProvenance[*].mappedTo.uriBaseId exists
               | ( if (.versionControlProvenance? // null) != null then
                     .versionControlProvenance |= map(
                       .mappedTo |= ( .mappedTo // {} )
@@ -145,6 +162,7 @@ jobs:
                     )
                   else . end)
             )
+            # Top-level schema/version; coerce URIs to strings w/ forward slashes
             | ( .version = "2.1.0" )
             | ( .["$schema"] = "https://raw.githubusercontent.com/oasis-tcs/sarif-spec/master/Schemata/sarif-schema-2.1.0.json" )
             | walk(
@@ -164,8 +182,7 @@ jobs:
       - name: Install SARIF Multitool (local)
         run: dotnet tool install --tool-path . Sarif.Multitool
 
-      # Pretty-print with jq (since this Multitool version has no 'reformat' verb)
-      - name: Pretty-print JSON
+      - name: Pretty-print JSON (stable key order)
         run: |
           tmp=security/reports/code-scanning-${{ github.run_id }}.tmp.json
           jq -S . security/reports/code-scanning-${{ github.run_id }}.sarif.json > "$tmp"
@@ -178,10 +195,48 @@ jobs:
       - name: Validate SARIF
         run: ./sarif validate security/reports/code-scanning-${{ github.run_id }}.sarif.json
 
-      - name: Commit SARIF file
+      # --- NEW: split into smaller parts for the VS Code SARIF viewer ---
+      - name: Split SARIF into parts (chunks of 2000 results per run)
+        run: |
+          set -euo pipefail
+          in=security/reports/code-scanning-${{ github.run_id }}.sarif.json
+          base=security/reports/code-scanning-${{ github.run_id }}
+
+          # Count runs
+          RUNS=$(jq '.runs | length' "$in")
+          if [ "$RUNS" -eq 0 ]; then
+            echo "No runs in SARIF; skipping split."
+            exit 0
+          fi
+
+          CHUNK=2000
+          for i in $(seq 0 $((RUNS-1))); do
+            COUNT=$(jq ".runs[$i].results | length" "$in")
+            if [ "$COUNT" -eq 0 ]; then
+              # write a tiny file with no results (still useful for viewer)
+              jq "{version, \$schema, runs:[ .runs[$i] | .results = [] ]}" "$in" > "${base}-run${i}-part1.sarif"
+              continue
+            fi
+            START=0
+            PART=1
+            while [ "$START" -lt "$COUNT" ]; do
+              jq --argjson i "$i" --argjson s "$START" --argjson n "$CHUNK" '
+                { version, $schema } +
+                { runs: [
+                    ( .runs[$i]
+                      | .results = ( .results | .[$s : ( ($s+$n) | if . > length then length else . end )] )
+                    )
+                  ] }
+              ' "$in" > "${base}-run${i}-part${PART}.sarif"
+              START=$((START + CHUNK))
+              PART=$((PART + 1))
+            done
+          done
+
+      - name: Commit SARIF files
         uses: stefanzweifel/git-auto-commit-action@v5
         with:
-          commit_message: "chore: export latest code-scanning SARIF (normalized & validated)"
+          commit_message: "chore: export SARIF (normalized, validated, split)"
           file_pattern: |
             security/reports/*.sarif.json
             security/reports/*.sarif
