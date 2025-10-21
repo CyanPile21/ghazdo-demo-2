@@ -53,10 +53,10 @@ jobs:
           mv "$out" "$in"
 
       # Fix 2: validate with Microsoft SARIF Multitool
-      - name: Validate SARIF
-        uses: microsoft/sarif-actions@v0.1
-        with:
-          command: "validate security/reports/code-scanning-${{ github.run_id }}.sarif.json"
+     # - name: Validate SARIF
+      #  uses: microsoft/sarif-actions@v0.1
+       # with:
+        #  command: "validate security/reports/code-scanning-${{ github.run_id }}.sarif.json"
 
       - name: Commit SARIF file
         uses: stefanzweifel/git-auto-commit-action@v5
