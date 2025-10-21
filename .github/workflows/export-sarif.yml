@@ -202,7 +202,6 @@ jobs:
           in=security/reports/code-scanning-${{ github.run_id }}.sarif.json
           base=security/reports/code-scanning-${{ github.run_id }}
 
-          # Count runs
           RUNS=$(jq '.runs | length' "$in")
           if [ "$RUNS" -eq 0 ]; then
             echo "No runs in SARIF; skipping split."
@@ -213,15 +212,15 @@ jobs:
           for i in $(seq 0 $((RUNS-1))); do
             COUNT=$(jq ".runs[$i].results | length" "$in")
             if [ "$COUNT" -eq 0 ]; then
-              # write a tiny file with no results (still useful for viewer)
-              jq "{version, \$schema, runs:[ .runs[$i] | .results = [] ]}" "$in" > "${base}-run${i}-part1.sarif"
+              # write a tiny file with no results
+              jq '{version, "$schema", runs:[ .runs[$i] | .results = [] ]}' "$in" > "${base}-run${i}-part1.sarif"
               continue
             fi
             START=0
             PART=1
             while [ "$START" -lt "$COUNT" ]; do
               jq --argjson i "$i" --argjson s "$START" --argjson n "$CHUNK" '
-                { version, $schema } +
+                { version, "$schema" } +
                 { runs: [
                     ( .runs[$i]
                       | .results = ( .results | .[$s : ( ($s+$n) | if . > length then length else . end )] )
@@ -232,6 +231,7 @@ jobs:
               PART=$((PART + 1))
             done
           done
+
 
       - name: Commit SARIF files
         uses: stefanzweifel/git-auto-commit-action@v5
