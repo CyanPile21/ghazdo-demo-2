@@ -15,7 +15,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # Optional: filter by tool or branch by appending e.g. ?tool_name=CodeQL&ref=refs/heads/main
+      # Optional: add ?tool_name=CodeQL&ref=refs/heads/main to the API URL below
       - name: Get latest analysis id
         id: list
         run: |
@@ -43,13 +43,7 @@ jobs:
             "https://api.github.com/repos/${{ github.repository }}/code-scanning/analyses/${{ steps.list.outputs.analysis_id }}" \
             -o security/reports/code-scanning-${{ github.run_id }}.sarif.json
 
-      # Normalize for strict viewers:
-      #  - drop minimal runs[].artifacts arrays (avoids SARIF2004)
-      #  - remove artifactLocation.index pointers (since artifacts array is gone)
-      #  - prune empty message objects
-      #  - fix SARIF1001 by dropping rule.name when it equals rule.id
-      #  - resolve SARIF2004 redundancy: if result.rule exists with metadata => drop ruleId/ruleIndex;
-      #    if result.rule is minimal (id only) => keep ruleId and drop rule.
+      # Normalize for strict viewers + SARIF2004/2005/2007 fixes
       - name: Normalize SARIF for strict viewers
         run: |
           set -euo pipefail
@@ -69,7 +63,7 @@ jobs:
               (type=="object") and has("id") and ((keys|length)==1);
 
             .runs |= map(
-              # A) Remove minimal artifacts array
+              # A) Remove minimal artifacts array (avoids SARIF2004)
               del(.artifacts)
 
               # B) Strip artifactLocation.index pointers
@@ -111,7 +105,7 @@ jobs:
                    )
                  else . end)
 
-              # F) Results normalization (handles your remaining SARIF2004)
+              # F) Results normalization (resolves remaining SARIF2004)
               | (if (.results? // null) != null then
                    .results |= map(
                      if (.rule? // null) != null and (.rule|type)=="object" then
@@ -125,7 +119,7 @@ jobs:
                      else
                        .
                      end
-                     # Also drop analysisTarget if it matches the primary location
+                     # Drop analysisTarget if same as primary location
                      | ( if (.analysisTarget? // null) != null and
                           (.locations? // null) != null and
                           ((.locations|length) > 0) and
@@ -136,6 +130,32 @@ jobs:
                         then del(.analysisTarget) else . end )
                    )
                  else . end)
+
+              # G) SARIF2005: ensure tool metadata (name<=3 words, info URL, version/semanticVersion)
+              | (.tool.driver |= (
+                   .
+                   # name: at most 3 words; keep original as fullName if needed
+                   | ( if (.name? and ((.name|tostring)|split(" ")|length) > 3)
+                       then .fullName = (.fullName // .name)
+                            | .name = ((.name|tostring)|split(" ")[0:3]|join(" "))
+                       else . end )
+                   # informationUri: add if missing
+                   | ( if (.informationUri? // null) == null
+                       then .informationUri = "https://codeql.github.com/"
+                       else . end )
+                   # version/semanticVersion: ensure at least one exists
+                   | ( if ((.version? // null) == null and (.semanticVersion? // null) == null)
+                       then .semanticVersion = "0.0.0"
+                       else . end )
+                 ))
+
+              # H) SARIF2007: ensure versionControlProvenance[*].mappedTo.uriBaseId exists
+              | ( if (.versionControlProvenance? // null) != null then
+                    .versionControlProvenance |= map(
+                      .mappedTo |= ( .mappedTo // {} )
+                      | .mappedTo.uriBaseId = ( .mappedTo.uriBaseId // "SRCROOT" )
+                    )
+                  else . end)
             )
           ' "$in" > "$out"
           mv "$out" "$in"
